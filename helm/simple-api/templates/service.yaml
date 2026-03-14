@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "simple-api.fullname" . }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "simple-api.name" . }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}

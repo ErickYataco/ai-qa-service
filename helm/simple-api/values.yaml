@@ -1,0 +1,34 @@
+replicaCount: 2
+
+image:
+  repository: YOUR_ECR_REPO/simple-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 8080
+
+env:
+  VLLM_BASE_URL: "http://vllm-router.vllm.svc.cluster.local"
+  MODEL_NAME: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  HTTP_TIMEOUT: "60"
+  LOG_LEVEL: "INFO"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+ingress:
+  enabled: true
+  className: alb
+  host: ""
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
