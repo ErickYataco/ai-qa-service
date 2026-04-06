@@ -25,3 +25,6 @@ output "configure_kubectl" {
 output "efs_file_system_id" {
   value = var.enable_efs_storage ? aws_efs_file_system.models[0].id : null
 }
+output "otel_collector_endpoint" {
+  value       = "http://opentelemetry-collector.observability.svc.cluster.local:4317"
+}

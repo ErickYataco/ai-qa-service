@@ -27,6 +27,43 @@ resource "kubernetes_secret" "hf_token" {
   depends_on = [kubernetes_namespace.vllm]
 }
 
+resource "helm_release" "keda" {
+  name             = "keda"
+  repository       = "https://kedacore.github.io/charts"
+  chart            = "keda"
+  version          = "2.16.0"
+  namespace        = "keda"
+  create_namespace = true
+
+  set {
+    name  = "resources.operator.requests.cpu"
+    value = "100m"
+  }
+  set {
+    name  = "resources.operator.requests.memory"
+    value = "128Mi"
+  }
+  set {
+    name  = "resources.operator.limits.memory"
+    value = "256Mi"
+  }
+
+  depends_on = [module.eks_addons]
+}
+
+resource "helm_release" "opentelemetry_collector" {
+  name             = "opentelemetry-collector"
+  repository       = "https://open-telemetry.github.io/opentelemetry-helm-charts"
+  chart            = "opentelemetry-collector"
+  version          = "0.110.0"
+  namespace        = "observability"
+  create_namespace = true
+
+  values = [file("${path.module}/config/otel-collector-values.yaml")]
+
+  depends_on = [module.eks_addons]
+}
+
 resource "helm_release" "vllm_stack" {
   name             = "vllm"
   repository       = "https://vllm-project.github.io/production-stack"

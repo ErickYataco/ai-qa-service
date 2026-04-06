@@ -1,11 +1,11 @@
-resource "aws_security_group" "efs" {
+resource "aws_security_group" "efs_access" {
   count       = var.enable_efs_storage ? 1 : 0
-  name        = "${var.cluster_name}-efs"
+  name        = "${var.cluster_name}-efs-access"
   description = "Allow EKS nodes to access EFS"
   vpc_id      = module.vpc.vpc_id
 
   ingress {
-    description = "NFS from VPC"
+    description = "Allow NFS traffic from VPC"
     from_port   = 2049
     to_port     = 2049
     protocol    = "tcp"
@@ -20,7 +20,7 @@ resource "aws_security_group" "efs" {
   }
 
   tags = merge(var.tags, {
-    Name = "${var.cluster_name}-efs"
+    Name = "${var.cluster_name}-efs-access"
   })
 }
 
@@ -30,7 +30,7 @@ resource "aws_efs_file_system" "models" {
   encrypted      = true
 
   tags = merge(var.tags, {
-    Name = "${var.cluster_name}-models"
+    Name = "${var.cluster_name}-efs-models"
   })
 }
 
@@ -39,10 +39,10 @@ resource "aws_efs_mount_target" "models" {
 
   file_system_id  = aws_efs_file_system.models[0].id
   subnet_id       = module.vpc.private_subnets[count.index]
-  security_groups = [aws_security_group.efs[0].id]
+  security_groups = [aws_security_group.efs_access[0].id]
 }
 
-resource "kubernetes_storage_class_v1" "efs" {
+resource "kubernetes_storage_class_v1" "efs_storage_class" {
   count = var.enable_efs_storage ? 1 : 0
 
   metadata {
@@ -65,27 +65,31 @@ resource "kubernetes_storage_class_v1" "efs" {
   ]
 }
 
-resource "kubernetes_persistent_volume_claim_v1" "efs_model_cache_pvc" {
-  count = var.enable_efs_storage ? 1 : 0
-
+resource "kubernetes_persistent_volume_v1" "efs_persistent_volume" {
   metadata {
-    name      = "llm-model-cache"
-    namespace = var.vllm_namespace
+    name = "efs-pv"
   }
 
   spec {
-    access_modes       = ["ReadWriteMany"]
-    storage_class_name = kubernetes_storage_class_v1.efs[0].metadata[0].name
+    capacity = {
+      storage = "40Gi"
+    }
 
-    resources {
-      requests = {
-        storage = "5Gi"
+    volume_mode                      = "Filesystem"
+    access_modes                     = ["ReadWriteMany"]
+    persistent_volume_reclaim_policy = "Retain"
+
+    persistent_volume_source {
+      csi {
+        driver        = "efs.csi.aws.com"
+        volume_handle = aws_efs_file_system.models[0].id  # Reference to the EFS filesystem
       }
     }
   }
 
   depends_on = [
-    kubernetes_namespace.vllm,
-    kubernetes_storage_class_v1.efs
+    aws_efs_file_system.models,        # EFS filesystem must exist first
+    aws_efs_mount_target.models,       # Mount targets must be ready
+    module.eks_addons,                 # Ensure EFS CSI driver is installed
   ]
 }

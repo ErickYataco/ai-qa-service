@@ -29,3 +29,4 @@ terraform.rc
 # Variable files that may contain secrets
 *.tfvars
 *.tfvars.json
+.DS_Store

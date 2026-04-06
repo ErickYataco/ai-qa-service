@@ -28,17 +28,40 @@ servingEngineSpec:
       limitCPU: "2"
       limitMemory: "6Gi"
       pvcStorage: "10Gi"
-      storageClass: "efs-sc"
+      storageClass: ""
       vllmConfig:
         dtype: "float16"
         extraArgs:
           - "--device=cpu"
           - "--no-enable-prefix-caching"
+      keda:
+        enabled: true
+        minReplicaCount: 0  # Allow scaling to zero
+        maxReplicaCount: 5
+        triggers:
+          - type: prometheus
+            metadata:
+              serverAddress: http://prometheus-operated.monitoring.svc:9090
+              metricName: vllm:num_requests_waiting
+              query: vllm:num_requests_waiting
+              threshold: '5'
+          - type: prometheus
+            metadata:
+              serverAddress: http://prometheus-operated.monitoring.svc:9090
+              metricName: vllm:incoming_keepalive
+              query: sum(rate(vllm:num_incoming_requests_total[1m]) > bool 0)
+              threshold: "1"
       env:
         - name: VLLM_CPU_KVCACHE_SPACE
           value: "1"
         - name: VLLM_CPU_OMP_THREADS_BIND
           value: "0-1"
+        - name: OTEL_SERVICE_NAME
+          value: "vllm-engine"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector:4317"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=vllm-engine,deployment.environment=test"
       initContainer:
         name: downloader
         image: python:3.11-slim
@@ -72,3 +95,7 @@ routerSpec:
     limits:
       cpu: "1"
       memory: "2Gi"
+  otel:
+    endpoint: "otel-collector:4317"
+    serviceName: "vllm-router"
+    secure: false

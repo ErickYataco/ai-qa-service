@@ -110,179 +110,142 @@ The **vLLM production Helm stack** deploys the following pods:
 curl -X POST http://<api-endpoint>/ask   -H "Content-Type: application/json"   -d '{"question":"What is Kubernetes?"}'
 ```
 
-# Scaling Strategies for LLM Workloads on EKS
-
-Serving large language models requires careful scaling strategies due to
-their high CPU, memory, and sometimes GPU requirements.\
-In Kubernetes environments such as Amazon EKS, scaling can occur at
-multiple layers: application level, pod level, and infrastructure level.
-
-The following approaches enable efficient and production-ready scaling.
-
-------------------------------------------------------------------------
-
-## Horizontal Scaling
-
-Horizontal scaling increases the number of inference pods to handle
-higher request volumes.
-
-Example:
-
-``` bash
-kubectl scale deployment vllm-smollm2-cpu-deployment-vllm --replicas=3
+## ⚙️ Feature Deep-Dives
+ 
+### 🔀 Prefix-Aware Routing
+ 
+Routes each request to the vLLM replica with the **warmest KV-cache** for
+the given prompt prefix — reducing **Time-To-First-Token (TTFT)** for
+repeated or similar prompts.
+ 
+Configured in `config/cpu-smollm2-ingress.tpl`:
+ 
+```yaml
+routerSpec:
+  repository: "lmcache/lmstack-router"
+  tag: "kvaware"
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2G"
+    limits:
+      cpu: "1"
+      memory: "2G"
+  routingLogic: "prefixaware"
 ```
-
-In this architecture, the vLLM router distributes incoming requests
-across the available serving pods.\
-This allows the system to increase throughput without modifying
-individual pod resources.
-
-Benefits:
-
--   Improved request concurrency
--   Higher inference throughput
--   Reduced latency during traffic spikes
--   Better fault tolerance if individual pods fail
-
-Relevant Kubernetes documentation:
-
-https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
-
-------------------------------------------------------------------------
-
-## Vertical Pod Autoscaler (VPA)
-
-Large language models can have variable memory and CPU requirements
-depending on token generation, batching behavior, and model size.
-
-The Vertical Pod Autoscaler (VPA) automatically adjusts CPU and memory
-requests based on historical usage.
-
-VPA can:
-
--   Recommend resource allocations
--   Automatically update pod resource requests
--   Restart pods with optimized configurations
-
-Benefits:
-
--   Prevents out-of-memory (OOM) errors
--   Avoids over-provisioning resources
--   Improves overall cluster resource efficiency
--   Simplifies tuning for inference workloads
-
-Example use cases:
-
--   Increasing memory for larger models
--   Adjusting CPU allocation for higher token generation rates
--   Optimizing resource allocation for batch inference
-
-Official documentation:
-
-https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler\
-https://kubernetes.io/docs/concepts/workloads/autoscaling/
-
-------------------------------------------------------------------------
-
-## Node Autoscaling with Karpenter
-
-When new pods cannot be scheduled due to insufficient resources,
-Kubernetes must provision additional nodes.
-
-Karpenter is an advanced node provisioning system designed to scale
-clusters rapidly and efficiently.
-
-Unlike the traditional Cluster Autoscaler, Karpenter directly provisions
-nodes based on pending pod requirements, allowing faster and more
-flexible scaling.
-
-Scaling workflow:
-
-1.  Traffic increases and inference requests grow
-2.  Kubernetes schedules additional vLLM serving pods
-3.  If existing nodes lack capacity, pods remain pending
-4.  Karpenter detects unschedulable pods
-5.  Karpenter provisions new worker nodes
-6.  Pods are scheduled automatically onto the new nodes
-
-Benefits:
-
--   Rapid node provisioning
--   Efficient bin-packing of workloads
--   Lower infrastructure cost
--   Native support for GPU and specialized instance types
--   Flexible instance selection (Spot, On-Demand, GPU)
-
-Official documentation:
-
-https://karpenter.sh/\
-https://karpenter.sh/docs/
-
-------------------------------------------------------------------------
-
-## Combining Scaling Layers
-
-In production environments, these strategies are typically combined:
-
-
-| Layer | Scaling Mechanism | Purpose |
+ 
+---
+ 
+### 📡 Distributed Tracing (OpenTelemetry)
+ 
+vLLM sends **OTLP traces** via gRPC to the OpenTelemetry Collector
+deployed in the `observability` namespace. Traces capture per-request
+latency, token generation time, and routing decisions.
+ 
+```yaml
+modelSpec:
+    - name: "smollm2-cpu"
+      repository: "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo"
+      env:
+        - name: OTEL_SERVICE_NAME
+          value: "vllm-engine"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector:4317"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.name=vllm-engine,deployment.environment=test"
+routerSpec:
+  otel:
+    endpoint: "otel-collector:4317"
+    serviceName: "vllm-router"
+    secure: false
+```
+ 
+The OTel Collector exposes traces as **Prometheus metrics** on port `8889`
+for scraping by the kube-prometheus-stack (when `enable_observability = true`).
+ 
+---
+ 
+### ⚡ KEDA — Event-Driven Autoscaling
+ 
+**KEDA** scales vLLM serving pods based on live inference traffic metrics,
+including **scale-to-zero** when the service is idle.
+ 
+```yaml
+modelSpec:
+    - name: "smollm2-cpu"
+      repository: "public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo"
+      keda:
+        enabled: true
+        minReplicaCount: 0  # Allow scaling to zero
+        maxReplicaCount: 5
+        triggers:
+          # Queue-based scaling
+          - type: prometheus
+            metadata:
+              serverAddress: http://prometheus-operated.monitoring.svc:9090
+              metricName: vllm:num_requests_waiting
+              query: vllm:num_requests_waiting
+              threshold: '5'
+          # Traffic-based keepalive (prevents scale-to-zero when traffic exists)
+          - type: prometheus
+            metadata:
+              serverAddress: http://prometheus-operated.monitoring.svc:9090
+              metricName: vllm:incoming_keepalive
+              query: sum(rate(vllm:num_incoming_requests_total[1m]) > bool 0)
+              threshold: "1"
+```
+ 
+---
+ 
+### 💾 EFS Shared Model Storage
+ 
+Models are pre-loaded onto **Amazon EFS** by an init container and
+shared across all vLLM pods via a static `PersistentVolume`.
+ 
+```yaml
+# cpu-smollm2-ingress.tpl
+storageClass: ""   # static binding — matches the PV created in storage.tf
+```
+ 
+**Benefits:**
+- Model downloaded once, shared across all replicas
+- Faster pod startup on scale-out events
+- Reduced Hugging Face Hub API usage
+ 
+---
+ 
+## 📊 Scaling Strategies
+ 
+| Layer | Mechanism | Purpose |
 | :--- | :--- | :--- |
-| **Application** | vLLM router | Distribute inference requests |
-| **Pod** | Horizontal scaling | Increase inference capacity |
-| **Pod resources** | Vertical Pod Autoscaler | Optimize CPU and memory |
-| **Infrastructure** | Karpenter | Provision compute nodes dynamically |
+| **Request routing** | vLLM prefix router | Maximize KV-cache hit rate |
+| **Pod scaling** | KEDA ScaledObject | Event-driven replica management |
+| **Pod resources** | Vertical Pod Autoscaler | Optimize CPU/memory per pod |
+| **Node scaling** | Karpenter / Cluster Autoscaler | Provision nodes for pending pods |
 
-This layered approach allows the platform to scale inference workloads efficiently while maintaining cost control and performance stability.
-Use code with caution.
-
-Why this works:
-The Table Syntax: Markdown requires the | symbol to define columns and the | :--- | line to define the header. Your original version used spaces/dashes which GitHub treats as a regular paragraph.
-The "Breathing Room": I added a blank line after the header and before/after the table. Without these, GitHub often "squashes" the text together, which is exactly what happened in your screenshot.
-Alignment: The :--- in the second line of the table ensures the text is left-aligned.
-Would you like me to combine this into the full README code I sent you earlier?
-
-
-
-
-
-
-
-# ⚙️ Operational Considerations
-
-## Persistent Model Storage
-
-Using **Amazon EFS** allows:
-
--   Shared model storage across pods
--   Faster startup times
--   Reduced model download overhead
-
-## Cost & Reliability
-
-### Cost Optimization
-
--   Use **Spot instances** to reduce compute costs
--   Cache models on **EFS**
-
-### Reliability
-
-Scale the router for high availability:
-
-``` bash
-kubectl scale deployment vllm-deployment-router --replicas=2
+---
+ 
+## 🧹 Teardown
+ 
+```bash
+cd terraform
+terraform destroy
 ```
-
-Health probes ensure automatic pod recovery.
-
-------------------------------------------------------------------------
-
-# 🏁 Conclusion
-
-This project demonstrates the deployment of a **scalable LLM inference
-service** using a modern **cloud-native stack**:
-
--   Terraform
--   Kubernetes (EKS)
--   FastAPI
--   Helm
--   vLLM
+ 
+---
+ 
+## 🏁 Conclusion
+ 
+This project demonstrates a **production-ready LLM inference platform**
+built on a modern cloud-native stack:
+ 
+| Component | Technology |
+| :--- | :--- |
+| Infrastructure | Terraform + AWS EKS |
+| LLM Serving | vLLM + SmolLM2-135M-Instruct |
+| API Layer | FastAPI |
+| Routing | vLLM prefix-aware router |
+| Autoscaling | KEDA |
+| Tracing | OpenTelemetry Collector |
+| Storage | Amazon EFS (static PV) |
+| Ingress | AWS Application Load Balancer |

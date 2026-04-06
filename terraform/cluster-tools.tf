@@ -34,7 +34,7 @@ locals {
   # Flags for each scenario
   enable_nvidia_operator = contains(["operator_custom", "operator_no_driver"], var.nvidia_setup)
   operator_use_values    = var.nvidia_setup == "operator_custom"
-  enable_nvidia_plugin = contains(["plugin"], var.nvidia_setup)
+  enable_nvidia_plugin   = contains(["plugin"], var.nvidia_setup)
 
   # Map-style overrides only for the no-driver path
   operator_inline_set = var.nvidia_setup == "operator_no_driver" ? [
@@ -67,12 +67,12 @@ module "data_addons" {
   ) : null
   depends_on = [module.eks_addons]
   # Device‑plugin only scenario handled via custom_addons in the parent module
-enable_nvidia_device_plugin = local.gpu_selected && local.enable_nvidia_plugin
-nvidia_device_plugin_helm_config = local.enable_nvidia_plugin ? {
-  tolerations = [{
-    key      = "nvidia.com/gpu"
-    operator = "Exists"
-    effect   = "NoSchedule"
-  }]
-}: null
+  enable_nvidia_device_plugin = local.gpu_selected && local.enable_nvidia_plugin
+  nvidia_device_plugin_helm_config = local.enable_nvidia_plugin ? {
+    tolerations = [{
+      key      = "nvidia.com/gpu"
+      operator = "Exists"
+      effect   = "NoSchedule"
+    }]
+  } : null
 }
